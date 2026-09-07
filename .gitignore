@@ -1,3 +1,4 @@
 # .gitignore
 *.o
 /examples/*/hello
+Claude.md

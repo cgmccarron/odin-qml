@@ -192,11 +192,18 @@ def main(path):
     print("foreign dos {")
 
     ok = skipped = 0
+    seen = set()
     for d in decls:
         m = re.match(r"DOS_API\s+(.*?)\s*DOS_CALL\s+(\w+)\s*\((.*)\)\s*;", d)
         if not m:
             continue
         ret_c, name, params_c = m.group(1), m.group(2), m.group(3)
+
+        # DOtherSide.h declares a few functions twice (legal in C,
+        # rejected by Odin). Keep the first occurrence.
+        if name in seen:
+            continue
+        seen.add(name)
 
         ret = map_type(ret_c)
         if ret is None:

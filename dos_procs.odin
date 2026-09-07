@@ -116,10 +116,6 @@ foreign dos {
 	dos_qabstractitemmodel_endResetModel :: proc(vptr: DosQAbstractItemModel) ---
 	dos_qabstractitemmodel_dataChanged :: proc(vptr: DosQAbstractItemModel, top_left: DosQModelIndex, bottom_right: DosQModelIndex, roles_ptr: ^c.int, roles_length: c.int) ---
 	dos_qabstractitemmodel_createIndex :: proc(vptr: DosQAbstractItemModel, row: c.int, column: c.int, data: rawptr) -> DosQModelIndex ---
-	dos_qabstractitemmodel_setData :: proc(vptr: DosQAbstractItemModel, index: DosQModelIndex, value: DosQVariant, role: c.int) -> bool ---
-	dos_qabstractitemmodel_roleNames :: proc(vptr: DosQAbstractItemModel) -> DosQHashIntQByteArray ---
-	dos_qabstractitemmodel_flags :: proc(vptr: DosQAbstractItemModel, index: DosQModelIndex) -> c.int ---
-	dos_qabstractitemmodel_headerData :: proc(vptr: DosQAbstractItemModel, section: c.int, orientation: c.int, role: c.int) -> DosQVariant ---
 	dos_qobject_qmetaobject :: proc() -> DosQMetaObject ---
 	dos_qobject_create :: proc(d_object_pointer: rawptr, meta_object: DosQMetaObject, d_object_callback: DObjectCallback) -> DosQObject ---
 	dos_qobject_signal_emit :: proc(vptr: DosQObject, name: cstring, parameters_count: c.int, parameters: [^]DosQVariant) ---

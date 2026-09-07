@@ -7,9 +7,9 @@ UI language handles layout, animation and styling; Odin handles everything else.
 
 > **Status: usable, early.** The raw C bindings are generated and complete, and
 > there is a wrapper layer over them covering applications, objects, properties,
-> signals, slots and variants. Item models and QML type registration are not
-> wrapped yet — reach for the raw `dos_*` functions there. The API may still
-> change.
+> signals, slots, variants and list models. Tree models
+> (`QAbstractItemModel`) and QML type registration are not wrapped yet — reach
+> for the raw `dos_*` functions there. The API may still change.
 
 ## Documentation
 
@@ -192,7 +192,47 @@ main :: proc() {
 
 `examples/counter` is this program, complete and runnable. `examples/hello` is
 the same idea written against the raw bindings, for when you want to see what
-the wrapper is doing.
+the wrapper is doing. `examples/list` is a `ListView` backed by an Odin slice,
+covering the other half of the library.
+
+### Lists
+
+A `ListView` needs a model rather than a property. `model_new` builds one from
+a set of role names and two procedures — how many rows there are, and what is
+in one:
+
+```odin
+Role :: enum { Name, Size }
+ROLES := []string{"name", "size"}
+
+row_count :: proc(m: ^qml.List_Model) -> int {
+	return len((cast(^Store)m.data).entries)
+}
+
+get_data :: proc(m: ^qml.List_Model, row: int, role: int, result: qml.DosQVariant) {
+	e := (cast(^Store)m.data).entries[row]
+	switch Role(role) {
+	case .Name: qml.variant_set_string(result, e.name)
+	case .Size: qml.variant_set_i64(result, e.size)
+	}
+}
+
+model := qml.model_new(&cl, ROLES, row_count, get_data, &store)
+qml.app_expose(app, "entries", &model.obj)
+```
+
+```qml
+ListView {
+    model: entries
+    delegate: Label { text: model.name + "  " + model.size }
+}
+```
+
+A model is a QObject too, so the same `Class` can carry the slots the delegate
+calls. Qt will not notice you mutating the backing data, so changes have to be
+announced — `model_begin_insert_rows`/`model_end_insert_rows` around an insert,
+`model_row_changed` after an edit, `model_begin_reset`/`model_end_reset` around
+a wholesale replacement. See [docs/api.md](docs/api.md#list-models).
 
 Qt 5 requires versioned imports (`import QtQuick 2.15`); Qt 6 does not.
 
@@ -218,6 +258,7 @@ then quietly stale.
 | ----------------------- | ----------------------------------------------------- |
 | `engine.odin`           | `App` — application, engine, loading, exposing         |
 | `object.odin`           | `Class`, `Object`, dispatch, signals, connections      |
+| `model.odin`            | `List_Model` — `QAbstractListModel` for `ListView`     |
 | `variant.odin`          | `QVariant` conversions                                 |
 | `types.odin`            | Handle types, callback signatures, metaobject structs  |
 | `dos_procs.odin`        | Generated `foreign` block — **do not hand-edit**      |

@@ -2,13 +2,22 @@
 
 Every procedure here lives in package `qml`. The package has two layers:
 
-- the **wrapper layer** (`engine.odin`, `object.odin`, `variant.odin`) — what
-  this document covers, and what you should write against;
+- the **wrapper layer** (`engine.odin`, `object.odin`, `model.odin`,
+  `variant.odin`) — what this document covers, and what you should write
+  against;
 - the **raw bindings** (`dos_procs.odin`) — a mechanical translation of
   `DOtherSide.h`, always available for anything the wrapper does not reach yet.
 
-Mixing the two is fine and expected. `Object.qobject` and `App.engine` are the
-raw handles, exposed deliberately so you can drop down without ceremony.
+It covers four things, roughly in the order a program needs them: starting an
+application and loading QML, describing a class and instantiating it as an
+object QML can bind to, backing a `ListView` with a list model, and moving
+values across the boundary as variants.
+
+Mixing the two layers is fine and expected. `App.engine`, `Object.qobject` and
+`List_Model.handle` are the raw handles, exposed deliberately so you can drop
+down without ceremony — the model wrapper in particular covers only what a
+flat list needs, and the column and tree calls are all still there under
+`dos_qabstractitemmodel_*`.
 
 For who frees what, see [memory.md](memory.md). Read it before writing anything
 that creates variants in a loop.
@@ -185,6 +194,111 @@ binding refuses to update.
 
 ---
 
+## List models
+
+A `List_Model` is a `QAbstractListModel`: the thing a QML `ListView`,
+`GridView` or `Repeater` binds its `model` property to. It is an `Object` with
+a second set of callbacks attached, so the same object can carry ordinary
+signals, slots and properties alongside its rows.
+
+You keep the data in whatever Odin form suits you and answer two questions
+about it: how many rows there are, and what is in one.
+
+### `model_new(cl, roles, row_count, get_data, data = nil, set_data = nil) -> ^List_Model`
+
+```odin
+Role :: enum { Name, Size }
+ROLES := []string{"name", "size"}
+
+row_count :: proc(m: ^qml.List_Model) -> int {
+	return len((cast(^Store)m.data).entries)
+}
+
+get_data :: proc(m: ^qml.List_Model, row: int, role: int, result: qml.DosQVariant) {
+	e := (cast(^Store)m.data).entries[row]
+	switch Role(role) {
+	case .Name: qml.variant_set_string(result, e.name)
+	case .Size: qml.variant_set_i64(result, e.size)
+	}
+}
+
+model := qml.model_new(&cl, ROLES, row_count, get_data, &store)
+qml.app_expose(app, "entries", &model.obj)
+```
+
+`roles` are the names the delegate uses — `model.name`, `model.size`. They are
+cloned, so the slice need not outlive the call.
+
+`data` is the same opaque pointer `object_new` takes. Slots reach it as
+`obj.data`, model callbacks as `m.data`.
+
+Returns nil, with a message on stderr, if there are no roles or either
+procedure is missing.
+
+`List_Model` embeds its `Object` as the first field — Qt hands one pointer
+back to both `dispatch` and the model callbacks, so the two must coincide.
+That is also why `&model.obj` and `cast(^qml.List_Model)obj` are both valid.
+
+### `Data_Proc :: proc(m: ^List_Model, row: int, role: int, result: DosQVariant)`
+
+`row` is already bounds-checked against `row_count`. `role` is an **index into
+the `roles` slice**, not Qt's raw role number — cast it to your own enum.
+Leaving `result` untouched reaches QML as `undefined`.
+
+Qt asks for its own roles (`DisplayRole` and friends) whether or not the
+delegate mentions them; those never reach `get_data`.
+
+### `Set_Data_Proc :: proc(m, row, role: int, value: DosQVariant) -> bool`
+
+Optional. Supplying one marks rows `Qt::ItemIsEditable`. Return false to refuse
+the write. Announcing the change is not automatic — call `model_row_changed`.
+
+### `model_destroy(m: ^List_Model)`
+
+As `object_destroy`, and with the same caveat: a model passed to `app_expose`
+belongs to `app_destroy`.
+
+### Announcing changes
+
+Qt caches, and will not notice you mutating the backing data. Every change has
+to be announced, and announced *around* itself — the begin call before the
+data changes, the end call after — because views read the model in between to
+work out what moved.
+
+| Call | When |
+| ---- | ---- |
+| `model_begin_reset(m)` / `model_end_reset(m)` | wholesale replacement |
+| `model_begin_insert_rows(m, first, last)` / `model_end_insert_rows(m)` | rows appearing |
+| `model_begin_remove_rows(m, first, last)` / `model_end_remove_rows(m)` | rows disappearing |
+| `model_row_changed(m, row, roles = nil)` | an in-place edit, *after* the fact |
+| `model_rows_changed(m, first, last, roles = nil)` | the same for a range |
+
+`first` and `last` are inclusive. For an insert they are the positions the new
+rows *will* occupy — appending one row to a list of ten is `(10, 10)`. For a
+remove the rows must still be present when `model_begin_remove_rows` is called.
+
+`roles` are role indices, as in `Data_Proc`; nil means every role changed.
+
+A reset is the blunt instrument: every delegate is rebuilt and the view loses
+its scroll position and selection. It is still the only correct call when the
+change is not a simple splice.
+
+A model that renders once and then goes stale is almost always a missing
+announcement.
+
+### `object_init(obj, cl, data = nil, super = nil, model_cbs = nil) -> bool`
+
+The half of `object_new` that builds the metaobject, exposed because
+`model_new` needs it. Call it directly only if you are wrapping another
+DOtherSide class the same way a model does: pass that class's metaobject as
+`super`, and `obj` must be allocated, zeroed, and have its `Object` at offset
+zero. On failure it leaves nothing allocated and the caller frees `obj`.
+
+`Object.on_destroy`, if set, runs at the start of `object_destroy` — that is
+how a model frees its role names without `engine.odin` knowing models exist.
+
+---
+
 ## Connections
 
 Connecting to a signal from Odin rather than from QML.
@@ -270,3 +384,19 @@ beyond the list against your own `qmetatype.h`
 the rest) are `distinct rawptr`, which costs nothing at runtime but makes Odin
 reject passing a variant where an object was wanted — a mistake C accepts
 silently and pays for with a segfault.
+
+What the wrapper does not reach yet, and what to call instead:
+
+| Missing | Raw entry point |
+| ------- | --------------- |
+| Tree models | `dos_qabstractitemmodel_create`, plus `createIndex`/`parent` mapping of your own |
+| Table models | `dos_qabstracttablemodel_create` |
+| Column insert/remove on a model | `dos_qabstractitemmodel_begin*Columns` / `end*Columns` |
+| Header data | the `headerData` callback, currently a stub in `model.odin` |
+| QML type registration | `dos_qdeclarative_qmlregistertype` |
+| Image providers | `dos_qquickimageprovider_create` |
+
+One rule carries over from `model.odin` to any of these: a `DosQModelIndex`
+argument must never be nil. DOtherSide dereferences it to form the
+`QModelIndex&` it hands Qt, so a nil "no parent" argument is a segfault inside
+Qt rather than a warning. Pass `dos_qmodelindex_create()` and delete it after.

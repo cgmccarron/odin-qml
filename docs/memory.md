@@ -37,6 +37,11 @@ warns at best and crashes at worst.
 Objects you never expose — helpers you drive from Odin alone — are yours, and
 `object_destroy` is the right call for them.
 
+A `List_Model` follows the same rule through the same code: `app_expose` takes
+`&model.obj`, and `app_destroy` reaches it as an `Object`. Its cloned role
+names are freed by the `on_destroy` hook `model_new` installs, so there is
+nothing extra to release — and nothing extra to release *twice*.
+
 ## Variants
 
 Anything named `variant_*` that *creates* returns memory you own:

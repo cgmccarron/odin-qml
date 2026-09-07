@@ -116,6 +116,12 @@ Object :: struct {
 	metaobject: DosQMetaObject,
 	data:       rawptr, // your struct; dispatch hands it back to you
 	handlers:   map[string]Slot_Proc,
+
+	// Called by object_destroy before anything else is released, so a
+	// type that embeds an Object as its first field can free its own
+	// allocations without engine.odin knowing the type exists. List_Model
+	// uses this; leave it nil otherwise.
+	on_destroy: proc(obj: ^Object),
 }
 
 @(private)
@@ -137,6 +143,33 @@ opt_cstring :: proc(pool: ^[dynamic]cstring, s: string) -> cstring {
 // metaobject. Both are programmer errors rather than runtime conditions,
 // so they are reported on stderr as well.
 object_new :: proc(cl: ^Class, data: rawptr = nil) -> ^Object {
+	obj := new(Object)
+	if !object_init(obj, cl, data) {
+		free(obj)
+		return nil
+	}
+	return obj
+}
+
+// The shared half of object_new, split out so `model.odin` can reuse it:
+// a model is an Object whose metaobject derives from QAbstractListModel
+// rather than QObject, and whose instantiation takes a callbacks struct.
+// Nothing else about it differs.
+//
+//	obj       - already allocated and zeroed; the caller frees it on failure
+//	super     - superclass metaobject; nil means plain QObject
+//	model_cbs - non-nil instantiates a QAbstractListModel instead
+//
+// `obj` is what Qt hands back to every callback, so a struct embedding an
+// Object must keep it as its *first* field: the same pointer is cast to
+// ^Object by dispatch and to the outer type by the model callbacks.
+object_init :: proc(
+	obj: ^Object,
+	cl: ^Class,
+	data: rawptr = nil,
+	super: DosQMetaObject = nil,
+	model_cbs: ^DosQAbstractItemModelCallbacks = nil,
+) -> bool {
 	// tprintf below allocates in the temp allocator; the mark/release
 	// guard hands that memory back on return instead of relying on the
 	// caller ever calling free_all.
@@ -145,11 +178,10 @@ object_new :: proc(cl: ^Class, data: rawptr = nil) -> ^Object {
 	if cl == nil || len(cl.name) == 0 {
 		// An empty name would reach dos_qmetaobject_create as a nil
 		// class_name, which Qt dereferences.
-		fmt.eprintln("odin-qml: object_new needs a Class with a non-empty name")
-		return nil
+		fmt.eprintln("odin-qml: object_init needs a Class with a non-empty name")
+		return false
 	}
 
-	obj := new(Object)
 	obj.data = data
 	obj.handlers = make(map[string]Slot_Proc)
 
@@ -246,9 +278,14 @@ object_new :: proc(cl: ^Class, data: rawptr = nil) -> ^Object {
 		}
 	}
 
+	super_mo := super
+	if super_mo == nil {
+		super_mo = dos_qobject_qmetaobject()
+	}
+
 	class_name := opt_cstring(&strs, cl.name)
 	obj.metaobject = dos_qmetaobject_create(
-		dos_qobject_qmetaobject(),
+		super_mo,
 		class_name,
 		&signals,
 		&slots,
@@ -256,29 +293,43 @@ object_new :: proc(cl: ^Class, data: rawptr = nil) -> ^Object {
 	)
 	if obj.metaobject == nil {
 		fmt.eprintfln("odin-qml: could not build a metaobject for %q", cl.name)
-		object_free_partial(obj)
-		return nil
+		object_free_handlers(obj)
+		return false
 	}
 
-	obj.qobject = dos_qobject_create(obj, obj.metaobject, dispatch)
+	if model_cbs != nil {
+		// The model handle is a QObject underneath -- QAbstractListModel
+		// derives from it, and DOtherSide's own delete for a model is
+		// dos_qobject_delete.
+		obj.qobject = cast(DosQObject)dos_qabstractlistmodel_create(
+			obj,
+			obj.metaobject,
+			dispatch,
+			model_cbs,
+		)
+	} else {
+		obj.qobject = dos_qobject_create(obj, obj.metaobject, dispatch)
+	}
 	if obj.qobject == nil {
 		fmt.eprintfln("odin-qml: could not instantiate %q", cl.name)
 		dos_qmetaobject_delete(obj.metaobject)
-		object_free_partial(obj)
-		return nil
+		obj.metaobject = nil
+		object_free_handlers(obj)
+		return false
 	}
-	return obj
+	return true
 }
 
-// Releases the Odin-side allocations of a half-built Object, for the
-// failure paths in object_new where there is no QObject to delete yet.
+// Releases the Odin-side allocations object_init made, leaving the Object
+// itself to its owner -- which is object_new on the failure path and
+// object_destroy at the end of its life.
 @(private)
-object_free_partial :: proc(obj: ^Object) {
+object_free_handlers :: proc(obj: ^Object) {
 	for k in obj.handlers {
 		delete(k)
 	}
 	delete(obj.handlers)
-	free(obj)
+	obj.handlers = nil
 }
 
 // Destroys the QObject and everything object_new allocated. Do not call
@@ -287,9 +338,15 @@ object_destroy :: proc(obj: ^Object) {
 	if obj == nil {
 		return
 	}
+	if obj.on_destroy != nil {
+		obj.on_destroy(obj)
+	}
+	// A QAbstractListModel is a QObject; DOtherSide has no separate
+	// delete for it, and this is the call nimqml makes too.
 	dos_qobject_delete(obj.qobject)
 	dos_qmetaobject_delete(obj.metaobject)
-	object_free_partial(obj)
+	object_free_handlers(obj)
+	free(obj)
 }
 
 // Emits a signal. QML property bindings that depend on a property whose

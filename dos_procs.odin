@@ -132,6 +132,7 @@ foreign dos {
 	dos_qobject_connect_static :: proc(sender: DosQObject, signal: cstring, receiver: DosQObject, slot: cstring, connection_type: DosQtConnectionType) -> DosQMetaObjectConnection ---
 	dos_qobject_disconnect_static :: proc(sender: DosQObject, signal: cstring, receiver: DosQObject, slot: cstring) ---
 	dos_qobject_disconnect_with_connection_static :: proc(connection: DosQMetaObjectConnection) ---
+	dos_qmetaobject_connection_delete :: proc(self: DosQMetaObjectConnection) ---
 	dos_qmodelindex_create :: proc() -> DosQModelIndex ---
 	dos_qmodelindex_create_qmodelindex :: proc(index: DosQModelIndex) -> DosQModelIndex ---
 	dos_qmodelindex_delete :: proc(vptr: DosQModelIndex) ---

@@ -61,6 +61,17 @@ CALLBACKS = {
 
 ENUMS = {"DosQEventLoopProcessEventFlag", "DosQtConnectionType"}
 
+# Per-parameter overrides.
+#
+# The header types a few array parameters as `void **`, which maps
+# faithfully to `^rawptr` but loses information Odin could have used. Where
+# the array element is really a known handle type, say so here: the binding
+# then takes `[^]DosQVariant` and callers can pass `raw_data(slice)`
+# directly instead of casting. Keyed by (function, parameter name).
+PARAM_OVERRIDES = {
+    ("dos_qobject_signal_emit", "parameters"): "[^]DosQVariant",
+}
+
 ODIN_KEYWORDS = {
     "context", "in", "map", "matrix", "using", "when", "where", "proc",
     "struct", "union", "enum", "bit_set", "import", "package", "return",
@@ -147,7 +158,7 @@ def split_params(s: str):
     return out
 
 
-def parse_param(p: str, idx: int):
+def parse_param(p: str, idx: int, fn: str = ""):
     p = p.strip()
     if not p or p == "void":
         return None
@@ -165,6 +176,7 @@ def parse_param(p: str, idx: int):
     name = re.sub(r"(?<!^)(?=[A-Z])", "_", name).lower()
     if name in ODIN_KEYWORDS:
         name = name + "_"
+    odin = PARAM_OVERRIDES.get((fn, name), odin)
     return f"{name}: {odin}"
 
 
@@ -194,8 +206,16 @@ def main(path):
     ok = skipped = 0
     seen = set()
     for d in decls:
-        m = re.match(r"DOS_API\s+(.*?)\s*DOS_CALL\s+(\w+)\s*\((.*)\)\s*;", d)
+        # DOS_CALL is optional: the header omits it on a few declarations
+        # (dos_qmetaobject_connection_delete, for one). Requiring it used to
+        # drop those silently -- the one case where something WAS silently
+        # wrong -- so match with or without it and report anything that
+        # still fails to parse.
+        m = re.match(
+            r"DOS_API\s+(.*?)\s*(?:DOS_CALL\s+)?(\w+)\s*\((.*)\)\s*;", d)
         if not m:
+            print(f"\t// TODO unparsed declaration: {d}")
+            skipped += 1
             continue
         ret_c, name, params_c = m.group(1), m.group(2), m.group(3)
 
@@ -215,7 +235,7 @@ def main(path):
         for i, p in enumerate(split_params(params_c)):
             if p.strip() in ("", "void"):
                 continue
-            got = parse_param(p, i)
+            got = parse_param(p, i, name)
             if got is None:
                 print(f"\t// TODO unmapped param `{p.strip()}`: {name}")
                 bad = True

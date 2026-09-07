@@ -5,9 +5,17 @@ Odin bindings for Qt QML, via [DOtherSide](https://github.com/filcuc/dotherside)
 Write your application logic in Odin and your interface in QML. Qt's declarative
 UI language handles layout, animation and styling; Odin handles everything else.
 
-> **Status: early.** The raw C bindings are generated and complete. The
-> ergonomic layer on top of them is not written yet. Expect to call
-> `dos_*` functions directly for now, and expect the API to change.
+> **Status: usable, early.** The raw C bindings are generated and complete, and
+> there is a wrapper layer over them covering applications, objects, properties,
+> signals, slots and variants. Item models and QML type registration are not
+> wrapped yet — reach for the raw `dos_*` functions there. The API may still
+> change.
+
+## Documentation
+
+- [docs/api.md](docs/api.md) — the wrapper API, procedure by procedure
+- [docs/memory.md](docs/memory.md) — who owns what, and what must be freed
+- [docs/generator.md](docs/generator.md) — regenerating the raw bindings
 
 ## Why this exists
 
@@ -108,24 +116,7 @@ The repository directory is `odin-qml`; the package inside it is `qml`.
 
 ## Usage
 
-```odin
-package main
-
-import "shared:odin-qml"
-
-main :: proc() {
-    qml.dos_qguiapplication_create()
-    defer qml.dos_qguiapplication_delete()
-
-    engine := qml.dos_qqmlapplicationengine_create()
-    defer qml.dos_qqmlapplicationengine_delete(engine)
-
-    qml.dos_qqmlapplicationengine_load(engine, "main.qml")
-    qml.dos_qguiapplication_exec()
-}
-```
-
-With `main.qml`:
+Interface in QML, logic in Odin. `main.qml`:
 
 ```qml
 import QtQuick
@@ -133,25 +124,106 @@ import QtQuick.Controls
 
 ApplicationWindow {
     visible: true
-    width: 400
+    width: 300
     height: 200
-    Text {
+
+    Column {
         anchors.centerIn: parent
-        text: "Hello from Odin"
+        spacing: 12
+
+        // Reads a property backed by Odin state. Re-evaluates whenever
+        // the property's notify signal fires.
+        Label { text: counter.value; font.pixelSize: 40 }
+
+        // Calls an Odin procedure.
+        Button { text: "Increment"; onClicked: counter.increment() }
     }
 }
 ```
 
+`main.odin`:
+
+```odin
+package main
+
+import qml "shared:odin-qml"
+
+// Your own state. The Object hands this back to every slot, so slots
+// stay free of globals.
+Counter :: struct {
+    value: int,
+}
+
+get_value :: proc(obj: ^qml.Object, args: []qml.DosQVariant, result: qml.DosQVariant) {
+    ctr := cast(^Counter)obj.data
+    qml.variant_set_int(result, ctr.value)
+}
+
+increment :: proc(obj: ^qml.Object, args: []qml.DosQVariant, result: qml.DosQVariant) {
+    ctr := cast(^Counter)obj.data
+    ctr.value += 1
+    qml.object_emit(obj, "valueChanged")   // tells QML to re-read
+}
+
+UI :: #load("main.qml", string)
+
+main :: proc() {
+    counter := Counter{}
+
+    app := qml.app_create()
+    defer qml.app_destroy(app)
+
+    cl := qml.class_make("Counter")
+    defer qml.class_destroy(&cl)
+
+    qml.class_signal(&cl, "valueChanged")
+    qml.class_slot(&cl, "getValue", get_value, .Int)
+    qml.class_slot(&cl, "increment", increment)
+    qml.class_property(&cl, "value", .Int, read = "getValue", notify = "valueChanged")
+
+    obj := qml.object_new(&cl, &counter)
+
+    // Must precede the load: QML bindings resolve at load time.
+    qml.app_expose(app, "counter", obj)
+    qml.app_load_source(app, UI)
+    qml.app_run(app)
+}
+```
+
+`examples/counter` is this program, complete and runnable. `examples/hello` is
+the same idea written against the raw bindings, for when you want to see what
+the wrapper is doing.
+
 Qt 5 requires versioned imports (`import QtQuick 2.15`); Qt 6 does not.
+
+### How it fits together
+
+A `Class` describes signals, slots and properties. `object_new` turns that
+description into a real Qt metaobject at runtime and instantiates a QObject
+against it. `app_expose` publishes that object to QML under a name.
+
+From there QML sees an ordinary Qt object: `counter.value` is a property it can
+bind to, `counter.increment()` is a method it can call. Qt routes all of it —
+slot calls, property reads, property writes — through a single callback, which
+looks the name up and calls your procedure.
+
+The consequence worth remembering: **a property only updates in the interface if
+its notify signal fires.** A property declared without one, or a slot that
+changes state without emitting, produces an interface that is correct once and
+then quietly stale.
 
 ## Layout
 
-| Path                    | Contents                                            |
-| ----------------------- | --------------------------------------------------- |
-| `types.odin`            | Handle types, callback signatures, metaobject structs |
-| `dos_procs.odin`        | Generated `foreign` block — **do not hand-edit**    |
-| `tools/gen_bindings.py` | Generator that produces `dos_procs.odin`            |
-| `examples/`             | Runnable examples                                    |
+| Path                    | Contents                                              |
+| ----------------------- | ----------------------------------------------------- |
+| `engine.odin`           | `App` — application, engine, loading, exposing         |
+| `object.odin`           | `Class`, `Object`, dispatch, signals, connections      |
+| `variant.odin`          | `QVariant` conversions                                 |
+| `types.odin`            | Handle types, callback signatures, metaobject structs  |
+| `dos_procs.odin`        | Generated `foreign` block — **do not hand-edit**      |
+| `tools/gen_bindings.py` | Generator that produces `dos_procs.odin`              |
+| `docs/`                 | API reference, memory model, generator notes           |
+| `examples/`             | Runnable examples                                      |
 
 ### Regenerating
 
@@ -163,7 +235,9 @@ python3 tools/gen_bindings.py /usr/local/include/DOtherSide/DOtherSide.h > dos_p
 ```
 
 The generator emits a `// TODO` comment for anything it cannot map, so an
-unmappable declaration is visible rather than silently dropped.
+unmappable declaration is visible rather than silently dropped. See
+[docs/generator.md](docs/generator.md) for the type tables and the header
+quirks it works around.
 
 ## Notes and gotchas
 
@@ -183,7 +257,16 @@ on_call :: proc "c" (self: rawptr, slot_name: qml.DosQVariant, argc: c.int, argv
 as `dos_qvariant_toString` and `dos_qobject_objectName` — return heap-allocated
 memory that must be released with `dos_chararray_delete`. The type system does
 not distinguish these from borrowed strings; the doxygen comments in
-`DOtherSide.h` say which is which.
+`DOtherSide.h` say which is which. The wrapper layer handles this for you:
+`variant_to_string` copies and frees, returning an ordinary Odin string.
+
+**`app_expose` takes ownership.** An object you expose is destroyed by
+`app_destroy`. Calling `object_destroy` on it as well is a double free — see
+[docs/memory.md](docs/memory.md) for the full ownership table.
+
+**Callbacks must restore the context** — including any you pass to the raw
+bindings. The wrapper's own dispatch does this before calling your slots, so
+`Slot_Proc` procedures are ordinary Odin code.
 
 **QML resolves names at runtime.** A misspelled property or slot name produces
 a console warning, not a compile error. In a metaobject-driven binding a
